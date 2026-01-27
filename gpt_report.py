@@ -2,7 +2,6 @@ import os
 import pandas as pd
 from openai import OpenAI
 
-
 def _build_prompt(result_df: pd.DataFrame) -> str:
     # 只取必要欄位，避免 token 爆掉
     keep = ["構面", "子構面", "題項", "平均數", "標準差", "CITC", "因素負荷量", "刪除後 Cronbach α", "該子構面整體 α", "警示標記", "CR_t", "CR_p"]
@@ -24,35 +23,24 @@ def _build_prompt(result_df: pd.DataFrame) -> str:
     )
     return prompt
 
+def generate_gpt_report(result_df: pd.DataFrame, model: str = "gpt-4o", api_key: str = None) -> str:
+    # 優先使用傳入的 api_key，如果沒有則抓環境變數
+    final_key = api_key or os.getenv("OPENAI_API_KEY")
+    if not final_key:
+        return "錯誤：找不到 OpenAI API Key。"
 
-def generate_gpt_report(result_df: pd.DataFrame, model: str = "gpt-5.2") -> str:
-    # ✅ KEY 放在環境變數，避免你之前 'Bearer 你的key' 造成編碼錯誤
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("找不到 OPENAI_API_KEY。請先設定環境變數後重開終端機再執行。")
-
-    client = OpenAI(api_key=api_key)
-
+    client = OpenAI(api_key=final_key)
     prompt = _build_prompt(result_df)
 
-    # ✅ 不用 response_format，避免你那個「unexpected keyword argument」
-    resp = client.responses.create(
-        model=model,
-        input=prompt,
-    )
-
-    # 官方回傳通常可以用 output_text 取文字
-    text = getattr(resp, "output_text", None)
-    if text:
-        return text
-
-    # 保底解析
     try:
-        chunks = []
-        for item in resp.output:
-            for c in item.content:
-                if getattr(c, "type", "") == "output_text":
-                    chunks.append(c.text)
-        return "\n".join(chunks).strip()
-    except Exception:
-        return str(resp)
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You are a helpful academic research assistant."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"OpenAI API 呼叫失敗: {str(e)}"
