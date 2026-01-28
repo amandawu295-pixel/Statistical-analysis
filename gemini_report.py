@@ -1,7 +1,7 @@
+# gemini_report.py
 import os
 import pandas as pd
-from openai import OpenAI
-
+import google.generativeai as genai
 
 def _build_prompt(result_df: pd.DataFrame) -> str:
     # 只取必要欄位，避免 token 爆掉
@@ -24,35 +24,53 @@ def _build_prompt(result_df: pd.DataFrame) -> str:
     )
     return prompt
 
-
-def generate_gpt_report(result_df: pd.DataFrame, model: str = "gpt-5.2") -> str:
-    # ✅ KEY 放在環境變數，避免你之前 'Bearer 你的key' 造成編碼錯誤
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("找不到 OPENAI_API_KEY。請先設定環境變數後重開終端機再執行。")
-
-    client = OpenAI(api_key=api_key)
-
-    prompt = _build_prompt(result_df)
-
-    # ✅ 不用 response_format，避免你那個「unexpected keyword argument」
-    resp = client.responses.create(
-        model=model,
-        input=prompt,
-    )
-
-    # 官方回傳通常可以用 output_text 取文字
-    text = getattr(resp, "output_text", None)
-    if text:
-        return text
-
-    # 保底解析
+def get_available_model():
+    """
+    自動偵測這把 API Key 能用的模型。
+    優先尋找支援 generateContent 的模型 (如 gemini-1.5-flash, gemini-pro)。
+    """
     try:
-        chunks = []
-        for item in resp.output:
-            for c in item.content:
-                if getattr(c, "type", "") == "output_text":
-                    chunks.append(c.text)
-        return "\n".join(chunks).strip()
-    except Exception:
-        return str(resp)
+        # 列出所有模型
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                # 優先回傳 1.5 flash 或 pro，因為它們比較新
+                if 'flash' in m.name:
+                    return m.name
+                if 'pro' in m.name:
+                    return m.name
+        
+        # 如果上面沒篩到，就回傳找到的第一個支援生成的模型
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                return m.name
+                
+    except Exception as e:
+        print(f"列出模型失敗: {e}")
+        
+    # 如果真的都找不到，回傳一個最通用的預設值碰運氣
+    return 'models/gemini-pro'
+
+def generate_gemini_report(result_df: pd.DataFrame, api_key: str) -> str:
+    if not api_key:
+        return "❌ 錯誤：未提供 Google API Key。"
+
+    # 設定 API Key
+    genai.configure(api_key=api_key)
+
+    try:
+        # 1. 自動尋找可用模型
+        model_name = get_available_model()
+        print(f"正在使用模型: {model_name}") # 除錯用
+        
+        model = genai.GenerativeModel(model_name)
+        
+        # 2. 建立 Prompt
+        prompt = _build_prompt(result_df)
+
+        # 3. 發送請求
+        response = model.generate_content(prompt)
+        
+        return response.text
+
+    except Exception as e:
+        return f"❌ 生成失敗：{str(e)}\n請確認 API Key 是否正確，或嘗試更換 Google 帳號申請 Key。"
