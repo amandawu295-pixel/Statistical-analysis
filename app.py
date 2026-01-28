@@ -10,7 +10,7 @@ import pandas as pd
 import streamlit as st
 import statsmodels.api as sm
 
-from analysis import run_item_analysis, normalize_item_columns
+from analysis import run_item_analysis, normalize_item_columns, run_independent_t_test
 
 
 # ---- Optional GPT report (if gpt_report.py exists & has generate_gpt_report) ----
@@ -388,9 +388,86 @@ try:
             except Exception as e:
                 st.error("迴歸分析失敗（safe）")
                 safe_show_exception(e)
+    
+    # 5) 獨立樣本 t 檢定 (NEW)
+    st.divider()
+    st.subheader("🔍 獨立樣本 t 檢定")
+    st.caption("比較兩組樣本（例如：男生 vs 女生）在各構面平均上是否有顯著差異。")
+
+    # A. 選擇分組變數 (Grouping Variable)
+    # 自動篩選：只列出「類別數」在 2~10 之間的欄位，方便使用者找性別/組別
+    potential_groups = []
+    # 這裡使用 df_raw_plus_dimmeans 讓使用者也能選原始資料的欄位
+    for c in df_raw_plus_dimmeans.columns:
+        # 排除數值太多的欄位(視為連續變數)
+        unique_vals = df_raw_plus_dimmeans[c].dropna().unique()
+        if 2 <= len(unique_vals) <= 10:
+            potential_groups.append(c)
+
+    # 讓使用者選，預設無
+    t_group_col = st.selectbox(
+        "① 選擇分組變數（需剛好兩組，例如：性別）", 
+        [""] + potential_groups,
+        index=0
+    )
+
+    # B. 選擇檢定變數 (Test Variables)
+    # 預設選取所有的「構面平均 (A, B, C...)」
+    t_dv_vars = st.multiselect(
+        "② 選擇檢定變數（通常為構面平均）",
+        options=list(df_raw_plus_dimmeans.columns),
+        default=dim_cols  # 預設帶入剛剛算好的構面
+    )
+
+    if t_group_col and t_dv_vars:
+        if st.button("執行獨立樣本 t 檢定", type="primary"):
+            try:
+                # 執行分析
+                g_stats, t_results = run_independent_t_test(
+                    df_raw_plus_dimmeans, 
+                    t_group_col, 
+                    t_dv_vars
+                )
+
+                if g_stats is None:
+                    # 代表有錯誤 (如組別不只兩組)
+                    st.error(t_results)
+                else:
+                    st.markdown("### (1) 分組統計量")
+                    st.dataframe(g_stats, width="stretch")
+                    
+                    st.markdown("### (2) 獨立樣本檢定結果")
+                    st.caption("程式已自動根據 Levene 檢定結果，決定採用「假設變異數相等」或「不相等」的 t 值與自由度。")
+                    st.dataframe(t_results, width="stretch")
+                    st.caption("註：* p<.05, ** p<.01, *** p<.001")
+
+                    # 下載按鈕
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.download_button(
+                            "下載 分組統計量 CSV",
+                            data=df_to_csv_bytes(g_stats),
+                            file_name=f"t_test_group_stats_{t_group_col}.csv",
+                            mime="text/csv"
+                        )
+                    with col2:
+                        st.download_button(
+                            "下載 t 檢定結果 CSV",
+                            data=df_to_csv_bytes(t_results),
+                            file_name=f"t_test_results_{t_group_col}.csv",
+                            mime="text/csv"
+                        )
+            
+            except Exception as e:
+                st.error("t 檢定執行失敗")
+                safe_show_exception(e)
+    elif t_group_col and not t_dv_vars:
+        st.info("請選擇至少一個檢定變數。")
 
     else:
-        st.info("請先選擇至少一個自變數與一個依變數，才會產出研究用資料與迴歸表格。")
+        # 如果使用者沒有選 IV/DV 也沒有選 t-test
+        if not (iv_vars and dv_var):
+            st.info("請設定上方變數以執行分析。")
 
 except Exception as e:
     st.error("Item analysis failed. See error details below (safe).")
