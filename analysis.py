@@ -1,4 +1,3 @@
-# analysis.py
 import re
 import numpy as np
 import pandas as pd
@@ -250,3 +249,114 @@ def run_item_analysis(df: pd.DataFrame) -> pd.DataFrame:
 
     out = out[expected_cols].sort_values(by=["構面", "子構面", "題項"], kind="mergesort").reset_index(drop=True)
     return out
+
+
+def run_independent_t_test(df: pd.DataFrame, group_col: str, dv_cols: list[str]):
+    """
+    執行獨立樣本 t 檢定 (SPSS 風格)
+    回傳:
+    1. group_stats: 分組敘述統計 (N, Mean, SD, SE)
+    2. t_test_res: t 檢定結果 (含 Levene, t值, df, p值, CI)
+    """
+    # 移除分組變數為空的列
+    data = df.dropna(subset=[group_col]).copy()
+    
+    # 取得分組標籤
+    groups = data[group_col].unique()
+    
+    # 防呆：確保剛好兩組
+    if len(groups) != 2:
+        return None, f"分組變數「{group_col}」必須剛好有兩個群組（目前偵測到 {len(groups)} 組：{groups}）。請檢查變數或先進行資料篩選。"
+
+    g1_label, g2_label = groups[0], groups[1]
+    
+    stats_rows = []
+    test_rows = []
+
+    for dv in dv_cols:
+        # 轉數值，無法轉的變 NaN
+        series = pd.to_numeric(data[dv], errors='coerce')
+        
+        # 分組切片
+        g1_data = series[data[group_col] == g1_label].dropna()
+        g2_data = series[data[group_col] == g2_label].dropna()
+        
+        # --- 1. 計算分組統計量 (Group Statistics) ---
+        n1, m1, s1 = len(g1_data), np.nanmean(g1_data), np.nanstd(g1_data, ddof=1)
+        n2, m2, s2 = len(g2_data), np.nanmean(g2_data), np.nanstd(g2_data, ddof=1)
+        
+        se1 = s1 / np.sqrt(n1) if n1 > 0 else np.nan
+        se2 = s2 / np.sqrt(n2) if n2 > 0 else np.nan
+
+        stats_rows.append({
+            "檢定變數": dv,
+            f"分組({group_col})": g1_label,
+            "個數(N)": n1,
+            "平均數": fmt(m1, 4),
+            "標準差": fmt(s1, 4),
+            "標準誤": fmt(se1, 4)
+        })
+        stats_rows.append({
+            "檢定變數": dv,
+            f"分組({group_col})": g2_label,
+            "個數(N)": n2,
+            "平均數": fmt(m2, 4),
+            "標準差": fmt(s2, 4),
+            "標準誤": fmt(se2, 4)
+        })
+        
+        if n1 < 2 or n2 < 2:
+            test_rows.append({"檢定變數": dv, "錯誤": "某組樣本數不足 (<2)，無法計算"})
+            continue
+
+        # --- 2. Levene's Test (檢定變異數同質性) ---
+        # H0: 變異數相等
+        levene_stat, levene_p = stats.levene(g1_data, g2_data)
+        
+        # 判斷標準：若 p < 0.05，拒絕 H0 (變異數不相等)，否則視為相等
+        equal_var = levene_p > 0.05
+        
+        # --- 3. t-test ---
+        t_stat, t_p = stats.ttest_ind(g1_data, g2_data, equal_var=equal_var)
+        
+        # --- 4. 差異與信賴區間 ---
+        mean_diff = m1 - m2
+        
+        if equal_var:
+            # 變異數相等 (Pooled variance)
+            df_val = n1 + n2 - 2
+            pooled_var = ((n1 - 1)*s1**2 + (n2 - 1)*s2**2) / df_val
+            se_diff = np.sqrt(pooled_var * (1/n1 + 1/n2))
+        else:
+            # 變異數不相等 (Welch's t-test approximation)
+            v1, v2 = s1**2/n1, s2**2/n2
+            df_val = (v1 + v2)**2 / (v1**2/(n1-1) + v2**2/(n2-1))
+            se_diff = np.sqrt(v1 + v2)
+            
+        # 95% 信賴區間
+        # 使用 t 分配計算
+        ci_low, ci_high = stats.t.interval(0.95, df_val, loc=mean_diff, scale=se_diff)
+
+        assumption_text = "假設變異數相等" if equal_var else "不假設變異數相等"
+
+        # 為了讓使用者容易讀懂，我們加上顯著性標記
+        sig_stars = ""
+        if t_p < 0.001: sig_stars = "***"
+        elif t_p < 0.01: sig_stars = "**"
+        elif t_p < 0.05: sig_stars = "*"
+
+        test_rows.append({
+            "檢定變數": dv,
+            "變異數假設結果": assumption_text,
+            "Levene F": fmt(levene_stat, 3),
+            "Levene Sig": fmt(levene_p, 3),
+            "t": fmt(t_stat, 3),
+            "自由度(df)": fmt(df_val, 3),
+            "顯著性(雙尾)": fmt(t_p, 3) + sig_stars,
+            "平均差異": fmt(mean_diff, 4),
+            "標準誤差異": fmt(se_diff, 4),
+            "95% CI 下界": fmt(ci_low, 4),
+            "95% CI 上界": fmt(ci_high, 4)
+        })
+
+    return pd.DataFrame(stats_rows), pd.DataFrame(test_rows)
